@@ -10,33 +10,74 @@ import { Sprout, LogOut, Compass, Camera, HelpCircle, Leaf, Trophy } from "lucid
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState<"my-garden" | "plant-selector" | "ai-camera" | "gardening-quiz">("my-garden");
+  const [mongoConnected, setMongoConnected] = useState<boolean>(false);
 
-  // On mount, auto-login active session if saved
+  // On mount, auto-login active session and sync from MongoDB if available
   useEffect(() => {
     const activeSession = localStorage.getItem("gardening_buddy_session");
-    if (activeSession) {
-      try {
-        const parsedUser: User = JSON.parse(activeSession);
-        // Sync with central database registry in case of updates
-        const usersJson = localStorage.getItem("gardening_buddy_users");
-        if (usersJson) {
-          const users = JSON.parse(usersJson);
-          if (users[parsedUser.username]) {
-            setCurrentUser(users[parsedUser.username].profile);
-            return;
+    
+    fetch("/api/auth/status")
+      .then((res) => res.json())
+      .then(async (data) => {
+        const isMongo = !!data.mongoConfigured;
+        setMongoConnected(isMongo);
+
+        if (activeSession) {
+          try {
+            const parsedUser: User = JSON.parse(activeSession);
+            if (parsedUser.username === "guest") {
+              setCurrentUser(parsedUser);
+              return;
+            }
+
+            if (isMongo) {
+              // Fetch latest profile from MongoDB
+              const response = await fetch(`/api/auth/profile?username=${encodeURIComponent(parsedUser.username)}`);
+              const profileData = await response.json();
+              if (response.ok && profileData.success) {
+                setCurrentUser(profileData.profile);
+                localStorage.setItem("gardening_buddy_session", JSON.stringify(profileData.profile));
+                return;
+              }
+            }
+            
+            // Fallback: Local database registry check
+            const usersJson = localStorage.getItem("gardening_buddy_users");
+            if (usersJson) {
+              const users = JSON.parse(usersJson);
+              if (users[parsedUser.username]) {
+                setCurrentUser(users[parsedUser.username].profile);
+                return;
+              }
+            }
+            setCurrentUser(parsedUser);
+          } catch (err) {
+            console.error("Session restore failed:", err);
           }
         }
-        setCurrentUser(parsedUser);
-      } catch (err) {
-        console.error("Session restore failed:", err);
-      }
-    }
+      })
+      .catch((err) => {
+        console.error("Failed to check MongoDB status in App component:", err);
+        if (activeSession) {
+          try {
+            const parsedUser: User = JSON.parse(activeSession);
+            setCurrentUser(parsedUser);
+          } catch (err2) {
+            console.error("Offline restore failed:", err2);
+          }
+        }
+      });
   }, []);
 
   const handleLoginSuccess = (user: User) => {
     setCurrentUser(user);
     // Keep session active
     localStorage.setItem("gardening_buddy_session", JSON.stringify(user));
+    // Check MongoDB status again in case we logged in from different state
+    fetch("/api/auth/status")
+      .then((res) => res.json())
+      .then((data) => setMongoConnected(!!data.mongoConfigured))
+      .catch((err) => console.error("Error setting mongo connection state:", err));
   };
 
   const handleLogout = () => {
@@ -44,8 +85,8 @@ export default function App() {
     localStorage.removeItem("gardening_buddy_session");
   };
 
-  // Sync user profile updates to local database
-  const handleUpdateUser = (updatedUser: User) => {
+  // Sync user profile updates to local/MongoDB database
+  const handleUpdateUser = async (updatedUser: User) => {
     setCurrentUser(updatedUser);
     
     // Save active session
@@ -54,16 +95,32 @@ export default function App() {
     // Update central database registry
     if (updatedUser.username === "guest") return; // guests don't write to registry
 
-    const usersJson = localStorage.getItem("gardening_buddy_users");
-    if (usersJson) {
+    if (mongoConnected) {
       try {
-        const users = JSON.parse(usersJson);
-        if (users[updatedUser.username]) {
-          users[updatedUser.username].profile = updatedUser;
-          localStorage.setItem("gardening_buddy_users", JSON.stringify(users));
+        const response = await fetch("/api/auth/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: updatedUser.username, profile: updatedUser }),
+        });
+        if (!response.ok) {
+          const data = await response.json();
+          console.error("Failed to sync profile to MongoDB:", data.error);
         }
       } catch (err) {
-        console.error("Failed to sync user database registry:", err);
+        console.error("Failed to sync user to MongoDB:", err);
+      }
+    } else {
+      const usersJson = localStorage.getItem("gardening_buddy_users");
+      if (usersJson) {
+        try {
+          const users = JSON.parse(usersJson);
+          if (users[updatedUser.username]) {
+            users[updatedUser.username].profile = updatedUser;
+            localStorage.setItem("gardening_buddy_users", JSON.stringify(users));
+          }
+        } catch (err) {
+          console.error("Failed to sync user database registry locally:", err);
+        }
       }
     }
   };

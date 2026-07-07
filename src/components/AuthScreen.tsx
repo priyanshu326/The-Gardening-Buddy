@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
 import { Sprout, LogIn, UserPlus, Leaf, Sparkles, Trophy } from "lucide-react";
 import { User } from "../types";
@@ -14,8 +14,20 @@ export default function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
   const [displayName, setDisplayName] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [success, setSuccess] = useState<string>("");
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [dbStatus, setDbStatus] = useState<{ mongoConfigured: boolean; message?: string; error?: string } | null>(null);
 
-  const handleAuth = (e: React.FormEvent) => {
+  useEffect(() => {
+    fetch("/api/auth/status")
+      .then((res) => res.json())
+      .then((data) => setDbStatus(data))
+      .catch((err) => {
+        console.error("Failed to check auth db status:", err);
+        setDbStatus({ mongoConfigured: false, error: "Unable to contact auth server" });
+      });
+  }, []);
+
+  const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setSuccess("");
@@ -26,54 +38,100 @@ export default function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
     }
 
     const cleanUsername = username.trim().toLowerCase();
+    setIsLoading(true);
 
-    // Get existing users from localStorage
-    const usersJson = localStorage.getItem("gardening_buddy_users");
-    const users: Record<string, { passwordHash: string; profile: User }> = usersJson
-      ? JSON.parse(usersJson)
-      : {};
+    try {
+      // If MongoDB is configured, use the MongoDB endpoints
+      if (dbStatus?.mongoConfigured) {
+        if (isLogin) {
+          const response = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: cleanUsername, password }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Login failed");
+          }
+          setSuccess("Welcome back! Logged in with MongoDB.");
+          setTimeout(() => {
+            onLoginSuccess(data.profile);
+          }, 1000);
+        } else {
+          if (!displayName.trim()) {
+            setError("Please enter a display name.");
+            setIsLoading(false);
+            return;
+          }
+          const response = await fetch("/api/auth/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: cleanUsername, password, displayName: displayName.trim() }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Sign up failed");
+          }
+          setSuccess("Account created successfully with MongoDB! Logging you in...");
+          setTimeout(() => {
+            onLoginSuccess(data.profile);
+          }, 1000);
+        }
+      } else {
+        // Fallback to local storage
+        const usersJson = localStorage.getItem("gardening_buddy_users");
+        const users: Record<string, { passwordHash: string; profile: User }> = usersJson
+          ? JSON.parse(usersJson)
+          : {};
 
-    if (isLogin) {
-      // Login flow
-      const userRecord = users[cleanUsername];
-      if (!userRecord || userRecord.passwordHash !== password) {
-        setError("Invalid username or password. If you are new, try signing up!");
-        return;
+        if (isLogin) {
+          const userRecord = users[cleanUsername];
+          if (!userRecord || userRecord.passwordHash !== password) {
+            setError("Invalid username or password. If you are new, try signing up!");
+            setIsLoading(false);
+            return;
+          }
+          setSuccess("Welcome back! Logging in offline...");
+          setTimeout(() => {
+            onLoginSuccess(userRecord.profile);
+          }, 1000);
+        } else {
+          if (!displayName.trim()) {
+            setError("Please enter a display name.");
+            setIsLoading(false);
+            return;
+          }
+          if (users[cleanUsername]) {
+            setError("Username already exists. Please choose another one.");
+            setIsLoading(false);
+            return;
+          }
+
+          const newProfile: User = {
+            username: cleanUsername,
+            displayName: displayName.trim(),
+            gardeningPoints: 0,
+            quizHighScore: 0,
+            myGarden: [],
+            badges: ["Seed Sower"]
+          };
+
+          users[cleanUsername] = {
+            passwordHash: password,
+            profile: newProfile
+          };
+
+          localStorage.setItem("gardening_buddy_users", JSON.stringify(users));
+          setSuccess("Account created successfully (offline)! Logging you in...");
+          setTimeout(() => {
+            onLoginSuccess(newProfile);
+          }, 1000);
+        }
       }
-      setSuccess("Welcome back! Logging in...");
-      setTimeout(() => {
-        onLoginSuccess(userRecord.profile);
-      }, 1000);
-    } else {
-      // Sign Up flow
-      if (!displayName.trim()) {
-        setError("Please enter a display name.");
-        return;
-      }
-      if (users[cleanUsername]) {
-        setError("Username already exists. Please choose another one.");
-        return;
-      }
-
-      const newProfile: User = {
-        username: cleanUsername,
-        displayName: displayName.trim(),
-        gardeningPoints: 0,
-        quizHighScore: 0,
-        myGarden: [],
-        badges: ["Seed Sower"] // default beginner badge
-      };
-
-      users[cleanUsername] = {
-        passwordHash: password, // simple hash alternative for prototype persistence
-        profile: newProfile
-      };
-
-      localStorage.setItem("gardening_buddy_users", JSON.stringify(users));
-      setSuccess("Account created successfully! Logging you in...");
-      setTimeout(() => {
-        onLoginSuccess(newProfile);
-      }, 1000);
+    } catch (err: any) {
+      setError(err.message || "Authentication failed. Please check your connection.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -88,7 +146,7 @@ export default function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
           id: "guest-mint",
           plantId: "mint",
           nickname: "My Desk Mint",
-          plantedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), // 3 days ago
+          plantedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
           lastWateredAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
           lastCheckedAt: new Date().toISOString(),
           status: "Healthy",
@@ -150,6 +208,31 @@ export default function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
       {/* Login / Sign Up Form Panel */}
       <div id="auth-form-panel" className="lg:w-1/2 p-8 lg:p-16 flex flex-col justify-center bg-white">
         <div className="max-w-md mx-auto w-full">
+          {dbStatus && (
+            <div className={`mb-6 p-3.5 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 transition-all ${
+              dbStatus.mongoConfigured 
+                ? "bg-emerald-50/50 border-emerald-100 text-emerald-800" 
+                : "bg-amber-50/50 border-amber-200/60 text-amber-900"
+            }`}>
+              <div className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${dbStatus.mongoConfigured ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
+                <div>
+                  <p className="font-bold">
+                    {dbStatus.mongoConfigured ? "MongoDB Cloud Connected" : "Local Database Mode"}
+                  </p>
+                  <p className="text-[10px] text-stone-500 mt-0.5">
+                    {dbStatus.mongoConfigured 
+                      ? "Your garden is safe in the cloud." 
+                      : "Please set MONGODB_URI in secrets to enable cloud sync."}
+                  </p>
+                </div>
+              </div>
+              <span className="text-[9px] px-2 py-0.5 rounded bg-white/80 border border-stone-200/50 text-stone-500 font-mono self-start sm:self-center">
+                {dbStatus.mongoConfigured ? "LIVE SYNC" : "OFFLINE PERSISTENCE"}
+              </span>
+            </div>
+          )}
+
           <div className="flex gap-4 border-b border-stone-200 pb-4 mb-8">
             <button
               id="auth-tab-login"
