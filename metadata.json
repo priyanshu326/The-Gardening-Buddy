@@ -1,0 +1,6 @@
+{
+  "name": "Gardening Buddy",
+  "description": "A smart home gardening assistant featuring an AI plant identifier, a personalized care tracker, a gardening knowledge quiz, and user achievements.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
